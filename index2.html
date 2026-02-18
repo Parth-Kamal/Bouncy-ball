@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bounce Tales: Fire & Fury</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Arial Black', sans-serif; }
+        canvas { display: block; }
+        #ui {
+            position: absolute; top: 10px; left: 10px; color: #fff;
+            text-shadow: 2px 2px #000; pointer-events: none; width: calc(100% - 20px);
+        }
+        .stats-container { display: flex; justify-content: space-between; align-items: center; }
+        #health-border { width: 200px; height: 15px; border: 3px solid #fff; background: #333; border-radius: 10px; }
+        #health-fill { width: 100%; height: 100%; background: #ff4757; transition: width 0.1s; border-radius: 5px; }
+        #overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.9); display: none; flex-direction: column;
+            justify-content: center; align-items: center; color: white; text-align: center;
+        }
+        button {
+            padding: 15px 40px; font-size: 24px; background: #f1c40f; border: none;
+            color: #000; cursor: pointer; border-radius: 10px; font-weight: bold; margin-top: 20px;
+        }
+        .fire-warn { color: #ff9f43; font-weight: bold; animation: burn 0.3s infinite; }
+        @keyframes burn { 0% { opacity: 1; transform: scale(1); } 50% { opacity: 0.7; transform: scale(1.1); } }
+    </style>
+</head>
+<body>
+
+<div id="ui">
+    <div class="stats-container">
+        <div>
+            <div id="level-title" style="font-size: 22px; color: #f1c40f;">LEVEL 1</div>
+            <div id="health-border"><div id="health-fill"></div></div>
+        </div>
+        <div style="text-align: right;">
+            <div style="font-size: 22px;">RINGS: <span id="score">0</span> / <span id="total">0</span></div>
+            <div class="fire-warn" id="status-alert">WATCH THE FIRE!</div>
+        </div>
+    </div>
+</div>
+
+<div id="overlay">
+    <h1 id="over-title">LEVEL COMPLETE</h1>
+    <p id="over-msg">You survived the fire!</p>
+    <button onclick="handleOverlayClick()" id="over-btn">NEXT LEVEL</button>
+</div>
+
+<canvas id="gameCanvas"></canvas>
+
+<script>
+/** 
+ * AUDIO SYSTEM (Synthesized & Text-to-Speech)
+ */
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+function playSfx(freq, type, dur, vol = 0.1) {
+    const osc = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    osc.type = type; osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+    g.gain.setValueAtTime(vol, audioCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + dur);
+    osc.connect(g); g.connect(audioCtx.destination);
+    osc.start(); osc.stop(audioCtx.currentTime + dur);
+}
+
+const screamAudio = new Audio('scream.mp3');
+
+function scream() {
+    screamAudio.currentTime = 0; // rewind to start so it can retrigger
+    screamAudio.volume = 0.8;
+    screamAudio.play();
+}
+
+/** 
+ * LEVEL DATA 
+ */
+const LEVEL_DATA = [
+    {
+        name: "LEVEL 1: THE WARMUP",
+        bg: ["#22a6b3", "#7ed6df"],
+        platforms: [
+            {x: 0, y: 650, w: 500}, {x: 600, y: 500, w: 250}, {x: 950, y: 400, w: 250},
+            {x: 1300, y: 550, w: 250}, {x: 1650, y: 450, w: 250}, {x: 2000, y: 650, w: 800}
+        ],
+        fires: [{x: 500, y: 700, w: 100}, {x: 1550, y: 700, w: 100}],
+        enemies: [{x: 300, y: 610, t:'g'}, {x: 2200, y: 610, t:'g'}, {x: 2500, y: 610, t:'g'}],
+        coins: [{x: 650, y: 450}, {x: 1000, y: 350}, {x: 2100, y: 600}]
+    },
+    {
+        name: "LEVEL 2: FIRE HELL",
+        bg: ["#eb4d4b", "#30336b"],
+        platforms: [
+            {x: 0, y: 650, w: 300}, {x: 400, y: 550, w: 200}, {x: 700, y: 450, w: 200},
+            {x: 1000, y: 350, w: 200}, {x: 1300, y: 450, w: 200}, {x: 1600, y: 550, w: 200},
+            {x: 1900, y: 650, w: 1000}
+        ],
+        fires: [
+            {x: 300, y: 700, w: 100}, {x: 600, y: 700, w: 100}, {x: 900, y: 700, w: 100},
+            {x: 1200, y: 700, w: 100}, {x: 1500, y: 700, w: 100}, {x: 1800, y: 700, w: 100}
+        ],
+        enemies: [
+            {x: 100, y: 150, t:'a'}, {x: 500, y: 100, t:'a'}, {x: 1000, y: 150, t:'a'},
+            {x: 2000, y: 610, t:'g'}, {x: 2200, y: 610, t:'g'}, {x: 2400, y: 610, t:'g'}
+        ],
+        coins: [{x: 450, y: 500}, {x: 1050, y: 300}, {x: 2500, y: 600}]
+    }
+];
+
+/** 
+ * GAME ENGINE 
+ */
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const keys = {};
+
+window.addEventListener('keydown', e => {
+    keys[e.code] = true;
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+});
+window.addEventListener('keyup', e => keys[e.code] = false);
+
+class Player {
+    constructor() {
+        this.reset();
+        this.hp = 100;
+        this.invuln = 0;
+    }
+    reset() {
+        this.x = 100; this.y = 400; this.vx = 0; this.vy = 0;
+        this.r = 20; this.onGround = false; this.sx = 1; this.sy = 1;
+    }
+    update() {
+        if (keys['ArrowRight']) this.vx += 0.8;
+        if (keys['ArrowLeft']) this.vx -= 0.8;
+        this.vx *= 0.88;
+        this.vy += 0.6; // Gravity
+        this.x += this.vx; this.y += this.vy;
+
+        if (keys['Space'] && this.onGround) {
+            this.vy = -14;
+            this.onGround = false;
+            this.sx = 0.7; this.sy = 1.3;
+            playSfx(400, 'sine', 0.2);
+        }
+        this.sx += (1 - this.sx) * 0.1;
+        this.sy += (1 - this.sy) * 0.1;
+        if (this.invuln > 0) this.invuln--;
+    }
+    draw(camX) {
+        ctx.save();
+        ctx.translate(this.x - camX, this.y);
+        if (this.invuln % 4 > 2) ctx.globalAlpha = 0.3;
+        ctx.scale(this.sx, this.sy);
+        let g = ctx.createRadialGradient(-5, -5, 2, 0, 0, this.r);
+        g.addColorStop(0, '#ff4757'); g.addColorStop(1, '#ff6b6b');
+        ctx.fillStyle = g;
+        ctx.beginPath(); ctx.arc(0, 0, this.r, 0, Math.PI*2); ctx.fill();
+        ctx.restore();
+    }
+}
+
+class Engine {
+    constructor() {
+        this.lvl = 0;
+        this.player = new Player();
+        this.load(0);
+        this.loop();
+    }
+    load(idx) {
+        const d = LEVEL_DATA[idx];
+        this.lvl = idx;
+        this.platforms = d.platforms;
+        this.fires = d.fires;
+        this.coins = d.coins.map(c => ({...c, collected: false}));
+        this.enemies = d.enemies.map(e => ({
+            x: e.x, y: e.y, sx: e.x, sy: e.y, t: e.t, d: 1, timer: Math.random()*10, alive: true
+        }));
+        this.camX = 0; this.score = 0; this.gameOver = false;
+        this.player.reset();
+        document.getElementById('level-title').innerText = d.name;
+        document.getElementById('total').innerText = this.coins.length;
+        this.updateUI();
+    }
+    update() {
+        if (this.gameOver) return;
+        this.player.update();
+        
+        // Enemy Logic
+        this.enemies.forEach(e => {
+            if (!e.alive) return;
+            e.timer += 0.05;
+            if (e.t === 'g') { e.x += 2 * e.d; if (Math.abs(e.x - e.sx) > 150) e.d *= -1; }
+            else { e.x += 3 * e.d; e.y = e.sy + Math.sin(e.timer)*60; if (Math.abs(e.x - e.sx) > 300) e.d *= -1; }
+        });
+
+        this.collisions();
+        this.camX += (this.player.x - canvas.width/2 - this.camX) * 0.1;
+        this.camX = Math.max(0, this.camX);
+        if (this.player.y > canvas.height + 100) this.damage(100);
+    }
+    collisions() {
+        this.player.onGround = false;
+        // Platforms
+        this.platforms.forEach(p => {
+            if (this.player.x + 15 > p.x && this.player.x - 15 < p.x + p.w) {
+                if (this.player.vy > 0 && this.player.y + 20 > p.y && this.player.y < p.y + 40) {
+                    this.player.y = p.y - 20; this.player.vy = 0; this.player.onGround = true;
+                }
+            }
+        });
+        // Fire
+        this.fires.forEach(f => {
+            if (this.player.x > f.x && this.player.x < f.x + f.w && this.player.y > f.y - 50) {
+                if (this.player.invuln <= 0) {
+                    scream(); // TRIGER SCREAM
+                    this.damage(20);
+                    this.player.vy = -10; // Jump out of fire
+                }
+            }
+        });
+        // Enemies
+        this.enemies.forEach(e => {
+            if (!e.alive) return;
+            if (Math.hypot(this.player.x - e.x, this.player.y - e.y) < 40) {
+                if (this.player.vy > 0 && this.player.y < e.y) {
+                    e.alive = false; this.player.vy = -12;
+                    playSfx(150, 'square', 0.2);
+                } else {
+                    this.damage(25);
+                    this.player.vx = this.player.x < e.x ? -15 : 15;
+                }
+            }
+        });
+        // Coins
+        this.coins.forEach(c => {
+            if (!c.collected && Math.hypot(this.player.x - c.x, this.player.y - c.y) < 30) {
+                c.collected = true; this.score++; this.updateUI();
+                playSfx(800, 'sine', 0.1);
+                if (this.score >= this.coins.length) this.end(true);
+            }
+        });
+    }
+    damage(amt) {
+        if (this.player.invuln > 0) return;
+        this.player.hp -= amt; this.player.invuln = 60;
+        this.updateUI();
+        playSfx(60, 'sawtooth', 0.4, 0.2);
+        if (this.player.hp <= 0) this.end(false);
+    }
+    updateUI() {
+        document.getElementById('health-fill').style.width = this.player.hp + '%';
+        document.getElementById('score').innerText = this.score;
+    }
+    end(win) {
+        this.gameOver = true;
+        document.getElementById('overlay').style.display = 'flex';
+        document.getElementById('over-title').innerText = win ? "LEVEL CLEAR" : "YOU DIED";
+        document.getElementById('over-msg').innerText = win ? "You conquered the horde!" : "The fire was too hot.";
+        document.getElementById('over-btn').innerText = win ? (this.lvl < LEVEL_DATA.length-1 ? "NEXT LEVEL" : "REPLAY") : "TRY AGAIN";
+    }
+    draw() {
+        const d = LEVEL_DATA[this.lvl];
+        let g = ctx.createLinearGradient(0,0,0,canvas.height);
+        g.addColorStop(0, d.bg[0]); g.addColorStop(1, d.bg[1]);
+        ctx.fillStyle = g; ctx.fillRect(0,0,canvas.width, canvas.height);
+
+        // Draw Fire
+        this.fires.forEach(f => {
+            let flicker = Math.sin(Date.now()/50) * 10;
+            ctx.fillStyle = '#ff9f43';
+            ctx.beginPath();
+            ctx.moveTo(f.x - this.camX, canvas.height);
+            ctx.lineTo(f.x + f.w/2 - this.camX, f.y - 20 + flicker);
+            ctx.lineTo(f.x + f.w - this.camX, canvas.height);
+            ctx.fill();
+            ctx.fillStyle = '#ee5253';
+            ctx.fillRect(f.x - this.camX, f.y, f.w, canvas.height - f.y);
+        });
+
+        // Platforms
+        this.platforms.forEach(p => {
+            ctx.fillStyle = '#2f3640'; ctx.fillRect(p.x - this.camX, p.y, p.w, 400);
+            ctx.fillStyle = '#f1c40f'; ctx.fillRect(p.x - this.camX, p.y, p.w, 8);
+        });
+
+        // Enemies & Coins
+        this.coins.forEach(c => {
+            if (c.collected) return;
+            ctx.fillStyle = '#f1c40f'; ctx.beginPath(); ctx.arc(c.x-this.camX, c.y, 12, 0, Math.PI*2); ctx.fill();
+        });
+        this.enemies.forEach(e => {
+            if (!e.alive) return;
+            ctx.fillStyle = e.t === 'g' ? '#353b48' : '#6c5ce7';
+            ctx.fillRect(e.x - this.camX - 20, e.y - 20, 40, 40);
+        });
+        this.player.draw(this.camX);
+    }
+    loop() {
+        this.update(); this.draw();
+        requestAnimationFrame(() => this.loop());
+    }
+}
+
+let game = new Engine();
+
+function handleOverlayClick() {
+    if (game.player.hp <= 0) {
+        game.player.hp = 100;
+        game.load(game.lvl);
+    } else {
+        game.load((game.lvl + 1) % LEVEL_DATA.length);
+        game.player.hp = 100;
+    }
+    document.getElementById('overlay').style.display = 'none';
+}
+
+
+window.addEventListener('resize', () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight; });
+canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+</script>
+</body>
+</html>
